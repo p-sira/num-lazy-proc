@@ -1,34 +1,35 @@
 name: CI
 
 on:
-    push:
-    pull_request:
-    workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
 
 jobs:
-    msrv:
-        runs-on: ubuntu-latest
-        steps:
-            - uses: actions/checkout@v7
-            - name: Install Rust 1.88
-              run: rustup toolchain install 1.88.0 --profile minimal
-            - name: Test on minimum supported Rust
-              run: cargo +1.88.0 test
-    test:
-        runs-on: ubuntu-latest
-        steps:
-            - uses: actions/checkout@v7
-            - name: Cache cargo
-              uses: actions/cache@v6
-              with:
-                  path: |
-                      ~/.cargo/registry
-                      ~/.cargo/git
-                      target
-                  key: cargo-test-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-            - name: Test
-              run: cargo test
-            - name: Check formatting
-              run: cargo fmt --all -- --check
-            - name: Lint
-              run: cargo clippy --all-targets -- -D warnings
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust 1.88
+        run: rustup toolchain install 1.88.0 --profile minimal
+      - name: Test on minimum supported Rust
+        run: cargo +1.88.0 test
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Cache cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-test-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+      - name: Test
+        run: cargo test
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings

@@ -1,6 +1,6 @@
 [package]
 name = "num-lazy-proc"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Sira Pornsiriprasert <code@psira.me>"]
 
 description = "Procedural macros for convenient generic floating-point constants and literals."

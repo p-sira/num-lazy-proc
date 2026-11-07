@@ -86,7 +86,7 @@ Recognized mathematical constants: `PI`, `TAU`, `E`, `PHI` (the golden ratio), `
 | Mode | Rewrites |
 | --- | --- |
 | `none` | No macro arguments |
-| `auto` (default) | Selected macros with supported expression arguments; currently `vec!`, including nested invocations and repetition syntax |
+| `auto` (default) | Standard expression macros including `vec!`, assertions, `dbg!`, and formatting/output macros |
 | `all` | Expression-shaped arguments in any macro, including custom macros |
 
 For example, the default `auto` mode handles nested vectors:
@@ -98,7 +98,9 @@ fn samples<T: num_traits::Float>(n: usize) -> Vec<Vec<T>> {
 }
 ```
 
-Use `#[generic_float(T, visit_macros = all)]` to traverse expression-shaped arguments in other macros. A macro body can contain a single expression, comma-separated expressions, or semicolon-separated expressions. The parser leaves unrecognized token syntax unchanged. This opt-in can change the meaning of macros such as `stringify!` and `matches!`, or cause custom macros matching `$value:literal` to stop compiling. They are left unchanged by default. Use `visit_macros = none` to leave even `vec!` arguments unchanged.
+In `auto`, standard expression macros such as `debug_assert!(x <= 1.0)` are visited while token-sensitive macros such as `matches!`, `concat!`, and `stringify!` stay opaque. Explicitly suffixed `f32`/`f64` literals stay concrete in automatically visited macros except `vec!`, so use unsuffixed values for generic comparisons. A lone literal in `dbg!` remains unchanged.
+
+Use `skip_macros = [dbg]` for shadowing macros with incompatible syntax, `visit_macros = all` to process expression-shaped arguments of other macros, or `visit_macros = none` to leave macro arguments unchanged. A macro's token grammar is not generally available, so opt-in rewriting may affect macros expecting `$value:literal` or identifier syntax.
 
 ### Custom conversion for other numeric traits
 

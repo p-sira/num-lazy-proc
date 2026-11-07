@@ -102,6 +102,88 @@ fn statement_macro<T: Float>() -> Vec<T> {
     values
 }
 
+#[generic_float(T, include = [float, integer])]
+fn qualified_auto_vec<T: Float>() -> Vec<T> {
+    std::vec![1.5; 2]
+}
+
+mod shadowed_auto_macros {
+    use super::*;
+
+    macro_rules! dbg {
+        ($value:literal) => {
+            $value
+        };
+        ($value:expr) => {
+            $value
+        };
+    }
+
+    macro_rules! assert_eq {
+        ($left:literal, $right:literal) => {
+            $left == $right
+        };
+    }
+
+    #[generic_float(T)]
+    pub(super) fn simple_literal<T: Float>() -> f64 {
+        let _ = core::mem::size_of::<T>();
+        dbg!(1.5)
+    }
+
+    #[generic_float(T)]
+    pub(super) fn wrapped_literals<T: Float>() -> (f64, f64, f64) {
+        let _ = core::mem::size_of::<T>();
+        (dbg!(1.5), dbg!((1.5)), dbg!(-1.5))
+    }
+
+    #[generic_float(T, skip_macros = [assert_eq])]
+    pub(super) fn skipped_macro<T: Float>() -> bool {
+        let _ = core::mem::size_of::<T>();
+        assert_eq!(1.5, 1.5)
+    }
+}
+
+#[generic_float(T)]
+fn auto_preserves_explicit_float_types<T: Float>(value: T) -> T {
+    assert_eq!(f64::from(2_u8), 2.0_f64);
+    std::assert_ne!(core::f64::consts::PI, 3.125_f64);
+    value
+}
+
+#[generic_float(T)]
+fn standard_macros_in_auto_mode<T: Float + core::fmt::Debug + core::fmt::Display>(value: T) -> T {
+    assert!(value > 0.5, "value={value}");
+    assert_eq!(value, 1.0, "expected one, got {value}");
+    assert_ne!(value, 2.0);
+    debug_assert!(value < INF);
+    debug_assert_eq!(value, 1.0);
+    debug_assert_ne!(value, 2.0);
+
+    // Format argument names are part of the format macro's syntax, even when
+    // they happen to coincide with recognized mathematical constants.
+    let formatted = format!("pi={PI}", PI = PI);
+    assert!(formatted.starts_with("pi=3.14"));
+
+    use std::fmt::Write as _;
+    let mut output = String::new();
+    write!(&mut output, "value={EPS}", EPS = EPS).unwrap();
+    assert!(output.starts_with("value="));
+
+    dbg!(value + 0.25)
+}
+
+#[generic_float(T)]
+fn integer_shaped_float_suffixes<T: Float>() -> T {
+    1f32 + 2f64
+}
+
+#[generic_float(T, include = [integer])]
+fn integer_only_leaves_float_suffixes<T: Float>() -> f64 {
+    let _ = core::mem::size_of::<T>();
+    1f64
+}
+
 macro_rules! custom_syntax {
     ($name:ident => $value:literal) => {
         $value
@@ -392,6 +474,31 @@ fn macros_can_be_ignored_or_left_unparsed() {
     assert_eq!(unparseable_macro(1.0_f32), 7.0_f64);
     assert_eq!(literal_macro_argument(0.0_f32), 1.5_f64);
     assert_eq!(token_sensitive_macros(0.0_f32), ("PI", true));
+}
+
+#[test]
+fn automatic_macros_preserve_concrete_types_and_can_be_skipped() {
+    assert_eq!(qualified_auto_vec::<f32>(), vec![1.5_f32; 2]);
+    assert_eq!(auto_preserves_explicit_float_types(0.5_f32), 0.5_f32);
+    assert_eq!(shadowed_auto_macros::simple_literal::<f32>(), 1.5_f64);
+    assert_eq!(
+        shadowed_auto_macros::wrapped_literals::<f32>(),
+        (1.5, 1.5, -1.5)
+    );
+    assert!(shadowed_auto_macros::skipped_macro::<f32>());
+}
+
+#[test]
+fn standard_macros_are_transformed_in_auto_mode() {
+    assert_eq!(standard_macros_in_auto_mode(1.0_f32), 1.25_f32);
+    assert_eq!(standard_macros_in_auto_mode(1.0_f64), 1.25_f64);
+}
+
+#[test]
+fn integer_shaped_float_suffixes_obey_float_category() {
+    assert_eq!(integer_shaped_float_suffixes::<f32>(), 3.0_f32);
+    assert_eq!(integer_shaped_float_suffixes::<f64>(), 3.0_f64);
+    assert_eq!(integer_only_leaves_float_suffixes::<f32>(), 1.0_f64);
 }
 
 #[test]

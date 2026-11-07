@@ -346,6 +346,7 @@ impl VisitMut for SubstituteLiteral<'_> {
 struct ReplaceNumbers {
     options: Options,
     preserve_explicit_float_types: bool,
+    changed: bool,
 }
 
 impl ReplaceNumbers {
@@ -443,6 +444,7 @@ impl ReplaceNumbers {
                         && !self.options.ignore.contains(&ident.to_string())
                     {
                         if let Some(replacement) = self.constant(&ident.to_string()) {
+                            self.changed = true;
                             result.extend(replacement.into_token_stream());
                             continue;
                         }
@@ -638,6 +640,7 @@ impl VisitMut for ReplaceNumbers {
                         if matches!(&lit.lit, Lit::Int(value) if !matches!(value.suffix(), "f32" | "f64"))) =>
             {
                 *node = self.convert(node.clone());
+                self.changed = true;
             }
             Expr::Path(path) if self.options.include.constants && path.qself.is_none() => {
                 if let Some(ident) = path.path.get_ident() {
@@ -645,6 +648,7 @@ impl VisitMut for ReplaceNumbers {
                     if !self.options.ignore.contains(&name) {
                         if let Some(replacement) = self.constant(&name) {
                             *node = replacement;
+                            self.changed = true;
                         }
                     }
                 }
@@ -664,6 +668,7 @@ impl VisitMut for ReplaceNumbers {
                 };
                 if should_replace {
                     *node = self.convert(Expr::Lit(expr.clone()));
+                    self.changed = true;
                 }
             }
             Expr::Macro(expression) => self.visit_macro_mut(&mut expression.mac),
@@ -713,18 +718,42 @@ pub fn generic_float(
 
 fn expand_generic_float(args: TokenStream2, item: TokenStream2) -> Result<TokenStream2> {
     let options = syn::parse2::<Options>(args)?;
-    let mut function = syn::parse2::<ItemFn>(item)?;
-    ReplaceNumbers {
+    let mut function = syn::parse2::<ItemFn>(item.clone())?;
+    let mut replacer = ReplaceNumbers {
         options,
         preserve_explicit_float_types: false,
+        changed: false,
+    };
+    replacer.visit_block_mut(&mut function.block);
+    if !replacer.changed {
+        // Preserve the original tokens when the visitor made no substitutions.
+        return Ok(item);
     }
-    .visit_block_mut(&mut function.block);
     Ok(quote!(#function))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_op_expansion_preserves_original_tokens_and_attributes() {
+        let item = quote!(
+            #[doc = "preserve attribute spans and token ordering"]
+            #[allow(non_snake_case)]
+            pub fn example<T: Clone>(value: T) -> T {
+                let _ = vec![value.clone(); 2];
+                value
+            }
+        );
+        let expanded = expand_generic_float(quote!(T), item.clone()).unwrap();
+        assert_eq!(expanded.to_string(), item.to_string());
+    }
+
+    #[test]
+    fn invalid_no_op_function_body_still_reports_parse_error() {
+        assert!(expand_generic_float(quote!(T), quote!(fn invalid<T>() { let = value; })).is_err());
+    }
 
     #[test]
     fn expansion_uses_proc_macro2_and_reports_parse_errors() {

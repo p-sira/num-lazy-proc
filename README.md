@@ -56,6 +56,10 @@ Use `include = [...]` to select which categories the attribute rewrites:
 
 `#[generic_float(T)]` is equivalent to `#[generic_float(T, include = [constants, float])]`. Integer literals retain their normal types by default, so indices and arguments such as `arr[0]` and `powi(2)` continue to work. Use `include = [constants]` to rewrite constants only, or `include = []` to disable rewriting entirely.
 
+Even with `include = [integer]`, integers in indices, array/repetition lengths, and type or const generic arguments remain unchanged. Other operations expecting integer arguments, such as `powi(2)`, may still require care when integer conversion is enabled.
+
+Nested items and `const { ... }` expressions are left unchanged because they cannot generally use conversions involving the enclosing function's generic type.
+
 ### Ignoring identifiers
 
 In Euler's column-buckling equation, `E` denotes Young's modulus rather than Euler's number. Use `ignore = [E]` to prevent the macro from replacing that parameter:
@@ -77,7 +81,15 @@ Recognized mathematical constants: `PI`, `TAU`, `E`, `PHI` (the golden ratio), `
 
 ### Nested macros
 
-By default, the attribute also visits macro arguments that can be parsed as Rust expressions. It supports a single expression, comma-separated expressions, and semicolon-separated expressions, recursing into nested macro invocations:
+`visit_macros` accepts three modes:
+
+| Mode | Rewrites |
+| --- | --- |
+| `none` | No macro arguments |
+| `auto` (default) | Selected macros with supported expression arguments; currently `vec!`, including nested invocations and repetition syntax |
+| `all` | Expression-shaped arguments in any macro, including custom macros |
+
+For example, the default `auto` mode handles nested vectors:
 
 ```rust
 #[num_lazy_proc::generic_float(T)]
@@ -86,7 +98,7 @@ fn samples<T: num_traits::Float>(n: usize) -> Vec<Vec<T>> {
 }
 ```
 
-To keep macro arguments unchanged, use `#[generic_float(T, visit_macros = false)]`. If a macro body cannot be parsed as expressions (for example, a custom token DSL), its contents are left unchanged. Macro arguments with special semantics may require the opt-out even if they happen to be valid Rust expressions.
+Use `#[generic_float(T, visit_macros = all)]` to traverse expression-shaped arguments in other macros. A macro body can contain a single expression, comma-separated expressions, or semicolon-separated expressions. The parser leaves unrecognized token syntax unchanged. This opt-in can change the meaning of macros such as `stringify!` and `matches!`, or cause custom macros matching `$value:literal` to stop compiling. They are left unchanged by default. Use `visit_macros = none` to leave even `vec!` arguments unchanged.
 
 ### Custom conversion for other numeric traits
 
@@ -106,4 +118,4 @@ fn circumference<T: CustomScalar>(radius: T) -> T {
 }
 ```
 
-You can write `convert = T::from(literal).unwrap()` or use a conversion function from another crate. The expression is substituted syntactically and remains responsible for ensuring the input type is accepted. When including integer literals, ensure your custom conversion accepts their input type (for example, `convert = T::from_f64(f64::from(literal))` for integers supported by `f64::from`).
+You can write `convert = T::from(literal).unwrap()`, use a conversion function from another crate, or use an expression-shaped macro such as `convert = cast_scalar!(T, literal)` whose body accepts expression arguments. Nested, comma-separated, and semicolon-separated macro arguments are supported in conversion templates. The expression is substituted syntactically and remains responsible for ensuring the input type is accepted. When including integer literals, ensure your custom conversion accepts their input type (for example, `convert = T::from_f64(f64::from(literal))` for integers supported by `f64::from`).

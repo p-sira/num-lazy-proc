@@ -34,6 +34,34 @@ fn custom_scalar_integer<T: CustomScalar>(value: T) -> T {
     2 * value
 }
 
+macro_rules! cast_scalar {
+    ($ty:ty, $value:expr) => {
+        <$ty as CustomScalar>::from_f64($value)
+    };
+}
+
+macro_rules! cast_scalar_semicolon {
+    ($ty:ty; $value:expr) => {
+        <$ty as CustomScalar>::from_f64($value)
+    };
+}
+
+macro_rules! identity_expr {
+    ($value:expr) => {
+        $value
+    };
+}
+
+#[generic_float(T, convert = cast_scalar!(T, literal))]
+fn macro_based_conversion<T: CustomScalar>(value: T) -> T {
+    PI + 2.0 * value
+}
+
+#[generic_float(T, convert = cast_scalar_semicolon!(T; identity_expr!(literal)))]
+fn nested_macro_conversion<T: CustomScalar>(value: T) -> T {
+    PI + 2.0 * value
+}
+
 #[generic_float(T)]
 fn nested_vectors<T: Float>() -> Vec<Vec<T>> {
     vec![vec![PI, 0.0], vec![TAU, 1.0]]
@@ -55,7 +83,7 @@ fn macro_with_ignored_identifier<T: Float>(E: T) -> Vec<T> {
     vec![E, PI]
 }
 
-#[generic_float(T, visit_macros = false)]
+#[generic_float(T, visit_macros = none)]
 fn untouched_macro<T: Float>(_value: T) -> Vec<f64> {
     use core::f64::consts::PI;
     vec![PI, 0.0]
@@ -67,7 +95,7 @@ macro_rules! append {
     };
 }
 
-#[generic_float(T)]
+#[generic_float(T, visit_macros = all)]
 fn statement_macro<T: Float>() -> Vec<T> {
     let mut values = Vec::new();
     append!(values, PI);
@@ -83,6 +111,64 @@ macro_rules! custom_syntax {
 #[generic_float(T)]
 fn unparseable_macro<T: Float>(_value: T) -> f64 {
     custom_syntax!(value => 7.0)
+}
+
+macro_rules! literal_token {
+    ($value:literal) => {
+        $value
+    };
+}
+
+#[generic_float(T)]
+fn literal_macro_argument<T: Float>(_value: T) -> f64 {
+    literal_token!(1.5_f64)
+}
+
+#[generic_float(T)]
+fn token_sensitive_macros<T: Float>(_value: T) -> (&'static str, bool) {
+    (stringify!(PI), matches!(1.0_f64, 1.0_f64))
+}
+
+#[generic_float(T)]
+fn nested_item_scopes<T: Float>(value: T) -> T {
+    const SCALE: f64 = 2.5;
+    fn adjustment() -> f64 {
+        1.5
+    }
+    value + T::from(SCALE + adjustment()).unwrap() + 3.0
+}
+
+#[generic_float(T)]
+fn inline_const_scope<T: Float>(value: T) -> T {
+    value + T::from(const { 2.5_f64 }).unwrap() + 3.0
+}
+
+#[generic_float(T, include = [integer])]
+fn negative_minimum_integer<T: Float>() -> T {
+    -2147483648_i32
+}
+
+fn const_size<const N: usize>() -> usize {
+    N
+}
+
+struct ConstMethod;
+
+impl ConstMethod {
+    fn size<const N: usize>(&self) -> usize {
+        N
+    }
+}
+
+#[generic_float(T, include = [constants, float, integer])]
+fn integer_syntax_contexts<T: Float>() -> T {
+    let fixed: [T; 2] = [PI, 1.0];
+    let repeated = [2.0; 2];
+    let mut vector = vec![3.0; 2];
+    vector.push(5.0);
+    let _ = const_size::<2>();
+    let _ = ConstMethod.size::<2>();
+    fixed[0] + repeated[1] + vector[0] + 4
 }
 
 #[generic_float(T)]
@@ -276,6 +362,9 @@ fn custom_conversion_without_num_traits_bound() {
     assert_eq!(custom_scalar_integer(3.0_f32), 6.0_f32);
     assert_eq!(custom_scalar_phi::<f32>().to_bits(), 0x3fcf_1bbd);
     assert_eq!(custom_scalar_phi::<f64>().to_bits(), 0x3ff9_e377_9b97_f4a8);
+    let expected = 2.0 + core::f64::consts::PI;
+    assert_eq!(macro_based_conversion(1.0_f64), expected);
+    assert_eq!(nested_macro_conversion(1.0_f64), expected);
 }
 
 #[test]
@@ -301,6 +390,19 @@ fn macros_visit_expression_arguments_recursively() {
 fn macros_can_be_ignored_or_left_unparsed() {
     assert_eq!(untouched_macro(1.0_f32), vec![core::f64::consts::PI, 0.0]);
     assert_eq!(unparseable_macro(1.0_f32), 7.0_f64);
+    assert_eq!(literal_macro_argument(0.0_f32), 1.5_f64);
+    assert_eq!(token_sensitive_macros(0.0_f32), ("PI", true));
+}
+
+#[test]
+fn independent_scopes_and_integer_syntax_are_preserved() {
+    assert_eq!(nested_item_scopes(1.0_f64), 8.0);
+    assert_eq!(inline_const_scope(1.0_f64), 6.5);
+    assert_eq!(negative_minimum_integer::<f64>(), -2147483648.0);
+    assert_eq!(
+        integer_syntax_contexts::<f64>(),
+        core::f64::consts::PI + 2.0 + 3.0 + 4.0
+    );
 }
 
 #[test]

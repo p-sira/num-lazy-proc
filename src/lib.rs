@@ -15,9 +15,10 @@
 //! By default, the macro converts floating-point literals and recognized constants.
 //! Integer literals retain their normal types by default, so indices and arguments
 //! such as `arr[0]` and `powi(2)` continue to work. Use `include = [...]` to select
-//! which categories the attribute rewrites.
+//! which categories the attribute rewrites. Nested items and const expressions
+//! are left unchanged.
 //! The optional `convert` argument accepts any Rust expression containing the
-//! `literal` placeholder.
+//! `literal` placeholder, including expression-shaped macro arguments.
 //!
 //! Mathematical constants come from `core::f64::consts` and are converted to the
 //! target type using the same conversion as numeric literals, so no `FloatConst`
@@ -45,7 +46,7 @@ use syn::{
     parse_macro_input, parse_quote,
     punctuated::Punctuated,
     visit_mut::{self, VisitMut},
-    Expr, Ident, ItemFn, Lit, LitBool, Macro, Result, Token,
+    Expr, Ident, ItemFn, Lit, Macro, Result, Stmt, Token, UnOp,
 };
 
 #[derive(Clone, Copy)]
@@ -70,7 +71,14 @@ struct Options {
     ignore: HashSet<String>,
     include: Inclusion,
     conversion: Option<Expr>,
-    visit_macros: bool,
+    visit_macros: MacroTraversal,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MacroTraversal {
+    None,
+    Auto,
+    All,
 }
 
 impl Parse for Options {
@@ -81,7 +89,7 @@ impl Parse for Options {
         let mut seen_ignore = false;
         let mut seen_include = false;
         let mut conversion = None;
-        let mut visit_macros = true;
+        let mut visit_macros = MacroTraversal::Auto;
         let mut seen_visit_macros = false;
 
         while !input.is_empty() {
@@ -149,8 +157,18 @@ impl Parse for Options {
                 }
                 "visit_macros" if !seen_visit_macros => {
                     seen_visit_macros = true;
-                    let enabled: LitBool = input.parse()?;
-                    visit_macros = enabled.value;
+                    let mode: Ident = input.parse()?;
+                    visit_macros = match mode.to_string().as_str() {
+                        "none" => MacroTraversal::None,
+                        "auto" => MacroTraversal::Auto,
+                        "all" => MacroTraversal::All,
+                        _ => {
+                            return Err(syn::Error::new_spanned(
+                                mode,
+                                "unknown visit_macros mode; expected none, auto, or all",
+                            ));
+                        }
+                    };
                 }
                 "ignore" | "include" | "convert" | "visit_macros" => {
                     return Err(syn::Error::new_spanned(key, "duplicate option"));
@@ -174,7 +192,47 @@ struct SubstituteLiteral<'a> {
     count: usize,
 }
 
+// Macro bodies are opaque to syn, so expression-shaped arguments need to be
+// parsed explicitly before visiting them.
+fn visit_macro_arguments(visitor: &mut impl VisitMut, mac: &mut Macro, is_vec: bool) {
+    if let Ok(mut expression) = mac.parse_body::<Expr>() {
+        visitor.visit_expr_mut(&mut expression);
+        mac.tokens = expression.into_token_stream();
+        return;
+    }
+
+    if let Ok(mut expressions) =
+        mac.parse_body_with(Punctuated::<Expr, Token![,]>::parse_terminated)
+    {
+        for expression in &mut expressions {
+            visitor.visit_expr_mut(expression);
+        }
+        mac.tokens = expressions.into_token_stream();
+        return;
+    }
+
+    if let Ok(mut expressions) =
+        mac.parse_body_with(Punctuated::<Expr, Token![;]>::parse_terminated)
+    {
+        // In vec![value; count], count must remain an integer expression.
+        if is_vec {
+            if let Some(value) = expressions.first_mut() {
+                visitor.visit_expr_mut(value);
+            }
+        } else {
+            for expression in &mut expressions {
+                visitor.visit_expr_mut(expression);
+            }
+        }
+        mac.tokens = expressions.into_token_stream();
+    }
+}
+
 impl VisitMut for SubstituteLiteral<'_> {
+    fn visit_macro_mut(&mut self, mac: &mut Macro) {
+        visit_macro_arguments(self, mac, false);
+    }
+
     fn visit_expr_mut(&mut self, expression: &mut Expr) {
         if let Expr::Path(path) = expression {
             if path.qself.is_none() && path.path.is_ident("literal") {
@@ -272,40 +330,51 @@ impl ReplaceNumbers {
 
 impl VisitMut for ReplaceNumbers {
     fn visit_macro_mut(&mut self, mac: &mut Macro) {
-        if !self.options.visit_macros {
-            return;
-        }
-
-        // Match numeric_literals' traversal: only rewrite macro bodies that
-        // can be parsed as Rust expressions. Other token syntaxes are left as-is.
-        if let Ok(mut expression) = mac.parse_body::<Expr>() {
-            self.visit_expr_mut(&mut expression);
-            mac.tokens = expression.into_token_stream();
-            return;
-        }
-
-        if let Ok(mut expressions) =
-            mac.parse_body_with(Punctuated::<Expr, Token![,]>::parse_terminated)
+        if self.options.visit_macros == MacroTraversal::None
+            || (self.options.visit_macros == MacroTraversal::Auto && !mac.path.is_ident("vec"))
         {
-            for expression in &mut expressions {
-                self.visit_expr_mut(expression);
-            }
-            mac.tokens = expressions.into_token_stream();
             return;
         }
+        visit_macro_arguments(self, mac, mac.path.is_ident("vec"));
+    }
 
-        if let Ok(mut expressions) =
-            mac.parse_body_with(Punctuated::<Expr, Token![;]>::parse_terminated)
-        {
-            for expression in &mut expressions {
-                self.visit_expr_mut(expression);
-            }
-            mac.tokens = expressions.into_token_stream();
+    fn visit_stmt_mut(&mut self, statement: &mut Stmt) {
+        // Nested items have their own generic scope and cannot capture T.
+        if !matches!(statement, Stmt::Item(_)) {
+            visit_mut::visit_stmt_mut(self, statement);
         }
+    }
+
+    fn visit_type_mut(&mut self, _ty: &mut syn::Type) {
+        // Array lengths and other const expressions in types require integer types.
+    }
+
+    fn visit_path_mut(&mut self, _path: &mut syn::Path) {
+        // Const generic arguments inside paths must retain their original types.
+    }
+
+    fn visit_generic_argument_mut(&mut self, _argument: &mut syn::GenericArgument) {
+        // Also protect turbofish arguments on method calls (receiver.method::<N>()).
+    }
+
+    fn visit_expr_repeat_mut(&mut self, repeat: &mut syn::ExprRepeat) {
+        self.visit_expr_mut(&mut repeat.expr);
+    }
+
+    fn visit_expr_index_mut(&mut self, index: &mut syn::ExprIndex) {
+        self.visit_expr_mut(&mut index.expr);
     }
 
     fn visit_expr_mut(&mut self, node: &mut Expr) {
         match node {
+            Expr::Const(_) => {} // T::from is not generally callable in a const context.
+            Expr::Unary(unary)
+                if self.options.include.integer
+                    && matches!(unary.op, UnOp::Neg(_))
+                    && matches!(unary.expr.as_ref(), Expr::Lit(lit) if matches!(lit.lit, Lit::Int(_))) =>
+            {
+                *node = self.convert(node.clone());
+            }
             Expr::Path(path)
                 if self.options.include.constants
                     && path.qself.is_none()
@@ -340,16 +409,20 @@ impl VisitMut for ReplaceNumbers {
 /// `include = [constants, float]`. Use `include = [...]` to select which categories
 /// to rewrite (`constants`, `float`, or `integer`), or `include = []` to disable
 /// rewriting entirely. Integer literals retain their normal types by default.
+/// Even when included, integer literals in indices, array/repetition lengths,
+/// and type or const generic arguments remain unchanged.
 /// Use `ignore = [E]` to prevent the macro from replacing that identifier.
 ///
 /// By default, included literals are converted using `T::from(literal).unwrap()`.
 /// The optional `convert` argument accepts any Rust expression containing the
-/// `literal` placeholder. Special constants such as `EPSILON` use methods on
-/// the target type.
+/// `literal` placeholder, including expression-shaped macro arguments. Special
+/// constants such as `EPSILON` use methods on the target type.
 ///
-/// By default, the attribute also visits macro arguments that can be parsed as
-/// Rust expressions, including comma- or semicolon-separated expressions and
-/// nested macros. Use `visit_macros = false` to leave macro arguments unchanged.
+/// `visit_macros = auto` (the default) currently rewrites `vec!` arguments,
+/// including nested `vec!` invocations. Use `visit_macros = all` to rewrite expression-shaped
+/// arguments in other macros, including comma- or semicolon-separated expressions.
+/// This setting can alter macros that inspect token syntax or expect literal or
+/// pattern arguments. Use `visit_macros = none` to leave all macro arguments unchanged.
 #[proc_macro_attribute]
 pub fn generic_float(args: TokenStream, item: TokenStream) -> TokenStream {
     let options = parse_macro_input!(args as Options);
@@ -368,6 +441,19 @@ mod tests {
         assert!(options.include.constants);
         assert!(options.include.float);
         assert!(!options.include.integer);
+        assert!(matches!(options.visit_macros, MacroTraversal::Auto));
+    }
+
+    #[test]
+    fn macro_traversal_modes_are_explicit() {
+        for (attribute, mode) in [
+            ("T, visit_macros = none", MacroTraversal::None),
+            ("T, visit_macros = auto", MacroTraversal::Auto),
+            ("T, visit_macros = all", MacroTraversal::All),
+        ] {
+            let parsed: Options = syn::parse_str(attribute).unwrap();
+            assert!(parsed.visit_macros == mode);
+        }
     }
 
     #[test]
@@ -385,6 +471,17 @@ mod tests {
             "T, include = [floats]",
             "T, include = [integer], include = [constants]",
             "T, literals = \"all\"",
+            "T, ignore = [PI], ignore = [E]",
+            "T, convert = literal, convert = literal",
+            "T, convert = f32::from(1.0)",
+            "T, convert = custom!(value => literal)",
+            "T, visit_macros = all, visit_macros = none",
+            "T, visit_macros = true",
+            "T, visit_macros = false",
+            "T, visit_macros = safe",
+            "T, visit_macros = vec",
+            "T, visit_macros = other",
+            "T, visit_macros = 1",
         ] {
             assert!(
                 syn::parse_str::<Options>(attribute).is_err(),

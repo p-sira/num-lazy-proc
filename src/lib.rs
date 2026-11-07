@@ -267,18 +267,19 @@ impl ReplaceNumbers {
     fn constant(&self, name: &str) -> Option<Expr> {
         let target = &self.options.target;
         let special = match name {
-            "EPSILON" | "EPS" => Some(quote!(#target::epsilon())),
-            "INFINITY" | "INF" => Some(quote!(#target::infinity())),
-            "NEG_INFINITY" | "NEG_INF" => Some(quote!(#target::neg_infinity())),
-            "NAN" => Some(quote!(#target::nan())),
-            "MIN_VAL" => Some(quote!(#target::min_value())),
-            "MAX_VAL" => Some(quote!(#target::max_value())),
-            "MIN_POSITIVE" => Some(quote!(#target::min_positive_value())),
-            "NEG_ZERO" => Some(quote!(#target::neg_zero())),
+            "EPSILON" | "EPS" => Some("epsilon"),
+            "INFINITY" | "INF" => Some("infinity"),
+            "NEG_INFINITY" | "NEG_INF" => Some("neg_infinity"),
+            "NAN" => Some("nan"),
+            "MIN_VAL" => Some("min_value"),
+            "MAX_VAL" => Some("max_value"),
+            "MIN_POSITIVE" => Some("min_positive_value"),
+            "NEG_ZERO" => Some("neg_zero"),
             _ => None,
         };
-        if let Some(tokens) = special {
-            return syn::parse2(tokens).ok();
+        if let Some(method) = special {
+            let method = Ident::new(method, Span::call_site());
+            return Some(parse_quote!(#target::#method()));
         }
 
         // Use correctly rounded decimal literals for compatibility with Rust
@@ -293,34 +294,13 @@ impl ReplaceNumbers {
             return Some(self.convert(phi));
         }
 
-        let known = matches!(
-            name,
-            "PI" | "FRAC_PI_2"
-                | "PI_2"
-                | "FRAC_PI_3"
-                | "PI_3"
-                | "FRAC_1_PI"
-                | "FRAC_2_PI"
-                | "FRAC_2_SQRT_PI"
-                | "TAU"
-                | "E"
-                | "LN_2"
-                | "LN_10"
-                | "LOG2_10"
-                | "LOG2_E"
-                | "LOG10_2"
-                | "LOG10_E"
-                | "SQRT_2"
-                | "FRAC_1_SQRT_2"
-        );
-        if !known {
-            return None;
-        }
-
         let constant_name = match name {
-            "PI_2" => "FRAC_PI_2",
-            "PI_3" => "FRAC_PI_3",
-            _ => name,
+            "PI_2" | "FRAC_PI_2" => "FRAC_PI_2",
+            "PI_3" | "FRAC_PI_3" => "FRAC_PI_3",
+            "PI" | "FRAC_1_PI" | "FRAC_2_PI" | "FRAC_2_SQRT_PI" | "TAU" | "E" | "LN_2"
+            | "LN_10" | "LOG2_10" | "LOG2_E" | "LOG10_2" | "LOG10_E" | "SQRT_2"
+            | "FRAC_1_SQRT_2" => name,
+            _ => return None,
         };
         let constant = Ident::new(constant_name, Span::call_site());
         let base: Expr = parse_quote!(core::f64::consts::#constant);
@@ -375,15 +355,13 @@ impl VisitMut for ReplaceNumbers {
             {
                 *node = self.convert(node.clone());
             }
-            Expr::Path(path)
-                if self.options.include.constants
-                    && path.qself.is_none()
-                    && path.path.get_ident().is_some() =>
-            {
-                let name = path.path.get_ident().expect("checked above").to_string();
-                if !self.options.ignore.contains(&name) {
-                    if let Some(replacement) = self.constant(&name) {
-                        *node = replacement;
+            Expr::Path(path) if self.options.include.constants && path.qself.is_none() => {
+                if let Some(ident) = path.path.get_ident() {
+                    let name = ident.to_string();
+                    if !self.options.ignore.contains(&name) {
+                        if let Some(replacement) = self.constant(&name) {
+                            *node = replacement;
+                        }
                     }
                 }
             }

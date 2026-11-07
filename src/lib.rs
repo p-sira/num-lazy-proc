@@ -261,7 +261,8 @@ impl ReplaceNumbers {
             return converted;
         }
         let target = &self.options.target;
-        parse_quote!(#target::from(#expression).unwrap())
+        // Generated expressions are emitted as tokens; reparsing them is unnecessary.
+        Expr::Verbatim(quote!(#target::from(#expression).unwrap()))
     }
 
     fn constant(&self, name: &str) -> Option<Expr> {
@@ -279,18 +280,18 @@ impl ReplaceNumbers {
         };
         if let Some(method) = special {
             let method = Ident::new(method, Span::call_site());
-            return Some(parse_quote!(#target::#method()));
+            return Some(Expr::Verbatim(quote!(#target::#method())));
         }
 
         // Use correctly rounded decimal literals for compatibility with Rust
         // versions before core::{f32,f64}::consts::GOLDEN_RATIO was stabilized.
         // Restrict the Clippy allowance to the generated constant declaration.
         if name == "PHI" {
-            let phi: Expr = parse_quote!({
+            let phi = Expr::Verbatim(quote!({
                 #[allow(clippy::approx_constant)]
                 const PHI_VALUE: f64 = 1.618_033_988_749_895_f64;
                 PHI_VALUE
-            });
+            }));
             return Some(self.convert(phi));
         }
 
@@ -303,7 +304,7 @@ impl ReplaceNumbers {
             _ => return None,
         };
         let constant = Ident::new(constant_name, Span::call_site());
-        let base: Expr = parse_quote!(core::f64::consts::#constant);
+        let base = Expr::Verbatim(quote!(core::f64::consts::#constant));
         Some(self.convert(base))
     }
 }

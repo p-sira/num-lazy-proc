@@ -1,0 +1,25 @@
+[package]
+name = "num-lazy-proc"
+version = "0.1.0"
+authors = ["Sira Pornsiriprasert <code@psira.me>"]
+
+description = "Procedural macros for convenient generic floating-point constants and literals."
+categories = ["mathematics", "science"]
+keywords = ["mathematics", "numerics", "generic", "proc-macro"]
+readme = "README.md"
+license = "BSD-3-Clause"
+edition = "2021"
+rust-version = "1.88"
+
+include = ["/src", "/LICENSE"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "visit-mut"] }
+
+[dev-dependencies]
+num-traits = { version = "0.2.19", default-features = false, features = ["libm"] }

@@ -81,13 +81,14 @@ Recognized mathematical constants: `PI`, `TAU`, `E`, `PHI` (the golden ratio), `
 
 ### Nested macros
 
-`visit_macros` accepts three modes:
+`visit_macros` accepts three modes and a list of macro names:
 
 | Mode | Rewrites |
 | --- | --- |
 | `none` | No macro arguments |
-| `auto` (default) | Standard expression macros including `vec!`, assertions, `dbg!`, and formatting/output macros |
-| `all` | Expression-shaped arguments in any macro, including custom macros |
+| `auto` (default) | Standard expression macros including `vec!`, `assert!`, `assert_eq!`, `assert_ne!`, `debug_assert!`, `debug_assert_eq!`, `debug_assert_ne!`, `dbg!`, and formatting/output macros |
+| `all` | All macro arguments, including floating-point literals and constants in custom syntax |
+| `[case, declare]` | The named macros plus the standard macros in `auto` (custom macro names are examples) |
 
 For example, the default `auto` mode handles nested vectors:
 
@@ -98,9 +99,11 @@ fn samples<T: num_traits::Float>(n: usize) -> Vec<Vec<T>> {
 }
 ```
 
-In `auto`, standard expression macros such as `debug_assert!(x <= 1.0)` are visited while token-sensitive macros such as `matches!`, `concat!`, and `stringify!` stay opaque. Explicitly suffixed `f32`/`f64` literals stay concrete in automatically visited macros except `vec!`, so use unsuffixed values for generic comparisons. A lone literal in `dbg!` remains unchanged.
+`auto` visits supported standard macros such as `debug_assert!(x <= 1.0)` while keeping token-sensitive macros such as `matches!`, `concat!`, and `stringify!` unchanged. Explicitly suffixed `f32`/`f64` literals retain their types in automatically visited macros except `vec!`, so `assert_eq!(some_f64, 1.0_f64)` remains a concrete comparison; use unsuffixed literals for generic comparisons. An isolated literal in `dbg!` also stays unchanged.
 
-Use `skip_macros = [dbg]` for shadowing macros with incompatible syntax, `visit_macros = all` to process expression-shaped arguments of other macros, or `visit_macros = none` to leave macro arguments unchanged. A macro's token grammar is not generally available, so opt-in rewriting may affect macros expecting `$value:literal` or identifier syntax.
+Use `#[generic_float(T, visit_macros = [case, declare])]` to rewrite selected custom macros. For example, it handles numeric expressions in `case!(@any [x, y] == INF, PI_2)` and initializers in `declare!(mut [x = NAN])`. Expression-shaped macro arguments are parsed as Rust expressions; other macro bodies are scanned for floating-point literals and constants, preserving punctuation, identifier assignment targets, and ambiguous integer tokens such as indices and repetition counts. A macro's grammar is not generally known to the proc macro, so traversal can change the meaning of custom macros matching `$value:literal`.
+
+Use `skip_macros = [dbg]` to exclude a shadowing macro with incompatible syntax, `visit_macros = all` to attempt all macros, or `visit_macros = none` to leave all macro arguments unchanged. Bare `auto` and `all` select traversal modes, while bracketed `[auto, all]` selects custom macros with those literal names.
 
 ### Custom conversion for other numeric traits
 

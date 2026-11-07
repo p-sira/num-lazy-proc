@@ -36,14 +36,13 @@
 //! assert!(load > 4.0e6 && load < 4.2e6);
 //! ```
 
-use proc_macro::TokenStream;
-use proc_macro2::Span;
+use proc_macro2::{Delimiter, Group, Span, TokenStream as TokenStream2, TokenTree};
 use quote::{quote, ToTokens};
 use std::collections::HashSet;
 use syn::{
     bracketed,
     parse::{Parse, ParseStream},
-    parse_macro_input, parse_quote,
+    parse_quote,
     punctuated::Punctuated,
     visit_mut::{self, VisitMut},
     Expr, Ident, ItemFn, Lit, Macro, Result, Stmt, Token, UnOp,
@@ -75,11 +74,12 @@ struct Options {
     visit_macros: MacroTraversal,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum MacroTraversal {
     None,
     Auto,
     All,
+    Selected(HashSet<String>),
 }
 
 // These standard macros accept expression arguments. Macros with pattern,
@@ -212,18 +212,31 @@ impl Parse for Options {
                 }
                 "visit_macros" if !seen_visit_macros => {
                     seen_visit_macros = true;
-                    let mode: Ident = input.parse()?;
-                    visit_macros = match mode.to_string().as_str() {
-                        "none" => MacroTraversal::None,
-                        "auto" => MacroTraversal::Auto,
-                        "all" => MacroTraversal::All,
-                        _ => {
-                            return Err(syn::Error::new_spanned(
-                                mode,
-                                "unknown visit_macros mode; expected none, auto, or all",
-                            ));
+                    if input.peek(syn::token::Bracket) {
+                        let content;
+                        bracketed!(content in input);
+                        let names = Punctuated::<Ident, Token![,]>::parse_terminated(&content)?;
+                        let mut selected = HashSet::new();
+                        for name in names {
+                            if !selected.insert(name.to_string()) {
+                                return Err(syn::Error::new_spanned(name, "duplicate macro name"));
+                            }
                         }
-                    };
+                        visit_macros = MacroTraversal::Selected(selected);
+                    } else {
+                        let mode: Ident = input.parse()?;
+                        visit_macros = match mode.to_string().as_str() {
+                            "none" => MacroTraversal::None,
+                            "auto" => MacroTraversal::Auto,
+                            "all" => MacroTraversal::All,
+                            _ => {
+                                return Err(syn::Error::new_spanned(
+                                    mode,
+                                    "unknown visit_macros mode; expected none, auto, all, or a list of macro names",
+                                ));
+                            }
+                        };
+                    }
                 }
                 "ignore" | "skip_macros" | "include" | "convert" | "visit_macros" => {
                     return Err(syn::Error::new_spanned(key, "duplicate option"));
@@ -336,6 +349,132 @@ struct ReplaceNumbers {
 }
 
 impl ReplaceNumbers {
+    // Opted-in macro traversal also accepts custom macro grammars, which may not
+    // parse as Rust expressions (e.g. `@any [...] == INF` or `mut [x = NAN]`).
+    // Rewrite floating-point atoms and constants, retaining the surrounding
+    // macro punctuation. Bare integer atoms have ambiguous roles (index,
+    // repetition count, const generic, or numeric value) and stay unchanged.
+    // This is intentionally opt-in: we cannot know whether a macro expects
+    // expression, literal, pattern, or identifier fragments from its tokens.
+    fn preceding_macro_path(trees: &[TokenTree], group_index: usize) -> Option<syn::Path> {
+        let bang = group_index.checked_sub(1)?;
+        if !matches!(&trees[bang], TokenTree::Punct(p) if p.as_char() == '!') {
+            return None;
+        }
+        let mut start = bang.checked_sub(1)?;
+        if !matches!(&trees[start], TokenTree::Ident(_)) {
+            return None;
+        }
+        while start >= 3
+            && matches!(&trees[start - 1], TokenTree::Punct(p) if p.as_char() == ':')
+            && matches!(&trees[start - 2], TokenTree::Punct(p) if p.as_char() == ':')
+            && matches!(&trees[start - 3], TokenTree::Ident(_))
+        {
+            start -= 3;
+        }
+        if start >= 2
+            && matches!(&trees[start - 1], TokenTree::Punct(p) if p.as_char() == ':')
+            && matches!(&trees[start - 2], TokenTree::Punct(p) if p.as_char() == ':')
+        {
+            start -= 2;
+        }
+        syn::parse2(trees[start..bang].iter().cloned().collect()).ok()
+    }
+
+    fn is_index_group(trees: &[TokenTree], index: usize) -> bool {
+        let Some(before) = index.checked_sub(1) else {
+            return false;
+        };
+        if matches!(before.checked_sub(1).and_then(|i| trees.get(i)),
+            Some(TokenTree::Punct(p)) if matches!(p.as_char(), '@' | '$'))
+        {
+            return false;
+        }
+        let candidate: TokenStream2 = [trees[before].clone(), trees[index].clone()]
+            .into_iter()
+            .collect();
+        matches!(syn::parse2::<Expr>(candidate), Ok(Expr::Index(_)))
+    }
+
+    fn visit_opaque_macro_tokens(&mut self, tokens: TokenStream2) -> TokenStream2 {
+        let trees: Vec<_> = tokens.into_iter().collect();
+        let mut result = TokenStream2::new();
+        for (i, tree) in trees.iter().enumerate() {
+            match tree {
+                TokenTree::Group(group) => {
+                    // Nested macros must use their normal traversal rules;
+                    // otherwise `vec![value; count]` loses its protected count.
+                    // Unselected nested macros remain completely opaque.
+                    let contents = if let Some(path) = Self::preceding_macro_path(&trees, i) {
+                        if let Ok(Expr::Macro(mut nested)) =
+                            syn::parse2::<Expr>(quote!(#path ! #group))
+                        {
+                            self.visit_macro_mut(&mut nested.mac);
+                            nested.mac.tokens
+                        } else {
+                            group.stream()
+                        }
+                    } else if group.delimiter() == Delimiter::Bracket
+                        && Self::is_index_group(&trees, i)
+                    {
+                        // Index expressions require their original integer type.
+                        group.stream()
+                    } else {
+                        self.visit_opaque_macro_tokens(group.stream())
+                    };
+                    let mut updated = Group::new(group.delimiter(), contents);
+                    updated.set_span(group.span());
+                    result.extend([TokenTree::Group(updated)]);
+                }
+                TokenTree::Ident(ident) => {
+                    // Leave paths, field names, macro tags, and assignment
+                    // targets alone. In particular, `PI = value` in an
+                    // opaque macro must keep its identifier binding.
+                    let before = i.checked_sub(1).and_then(|j| trees.get(j));
+                    let after = trees.get(i + 1);
+                    let protected_before = matches!(before, Some(TokenTree::Punct(p))
+                        if matches!(p.as_char(), ':' | '.' | '@' | '$'));
+                    let protected_after = matches!(after, Some(TokenTree::Punct(p))
+                        if matches!(p.as_char(), ':' | '!')
+                            || (p.as_char() == '=' && p.spacing() == proc_macro2::Spacing::Alone));
+                    if !protected_before
+                        && !protected_after
+                        && self.options.include.constants
+                        && !self.options.ignore.contains(&ident.to_string())
+                    {
+                        if let Some(replacement) = self.constant(&ident.to_string()) {
+                            result.extend(replacement.into_token_stream());
+                            continue;
+                        }
+                    }
+                    result.extend([tree.clone()]);
+                }
+                TokenTree::Literal(_) => {
+                    if let Ok(mut expression) = syn::parse2::<Expr>(tree.to_token_stream()) {
+                        // Raw integers may be indices, counts, tuple fields, or
+                        // const arguments. Only expression-shaped macro bodies
+                        // provide enough syntax to rewrite them safely.
+                        if matches!(&expression, Expr::Lit(value)
+                            if matches!(&value.lit, Lit::Int(int)
+                                if !matches!(int.suffix(), "f32" | "f64")))
+                            || matches!(i.checked_sub(1).and_then(|j| trees.get(j)),
+                                Some(TokenTree::Punct(p)) if p.as_char() == '.')
+                        {
+                            result.extend([tree.clone()]);
+                        } else {
+                            self.visit_expr_mut(&mut expression);
+                            result.extend(expression.into_token_stream());
+                        }
+                    } else {
+                        result.extend([tree.clone()]);
+                    }
+                }
+                _ => result.extend([tree.clone()]),
+            }
+        }
+        result
+    }
+
     fn convert(&self, expression: Expr) -> Expr {
         if let Some(template) = &self.options.conversion {
             let mut converted = template.clone();
@@ -405,12 +544,36 @@ impl VisitMut for ReplaceNumbers {
         if macro_name
             .as_ref()
             .is_some_and(|name| self.options.skip_macros.contains(name))
-            || self.options.visit_macros == MacroTraversal::None
-            || (self.options.visit_macros == MacroTraversal::Auto && !is_auto_macro(&mac.path))
         {
             return;
         }
-        let automatic = self.options.visit_macros == MacroTraversal::Auto;
+        let permitted = match &self.options.visit_macros {
+            MacroTraversal::None => false,
+            MacroTraversal::Auto => is_auto_macro(&mac.path),
+            MacroTraversal::All => true,
+            MacroTraversal::Selected(names) => {
+                is_auto_macro(&mac.path)
+                    || mac
+                        .path
+                        .segments
+                        .last()
+                        .is_some_and(|segment| names.contains(&segment.ident.to_string()))
+            }
+        };
+        if !permitted {
+            return;
+        }
+        let explicitly_selected = match &self.options.visit_macros {
+            MacroTraversal::All => true,
+            MacroTraversal::Selected(names) => {
+                macro_name.as_ref().is_some_and(|name| names.contains(name))
+            }
+            _ => false,
+        };
+        let automatic = is_auto_macro(&mac.path) && !explicitly_selected;
+        // An isolated literal in `dbg!` does not have a generic numeric
+        // context. Keeping its original tokens also preserves custom macros
+        // named `dbg` that accept `$value:literal`.
         if automatic
             && macro_name.as_deref() == Some("dbg")
             && mac
@@ -419,9 +582,22 @@ impl VisitMut for ReplaceNumbers {
         {
             return;
         }
+        // Explicit suffixes indicate a concrete float type. Outside `vec!`,
+        // changing them in automatically visited macros can break comparisons
+        // against f64 values and introduce unexpected trait bounds on T.
         let previous = self.preserve_explicit_float_types;
         self.preserve_explicit_float_types = automatic && macro_name.as_deref() != Some("vec");
-        let _ = visit_macro_arguments(self, mac, macro_name.as_deref() == Some("vec"));
+        let parsed = visit_macro_arguments(
+            self,
+            mac,
+            mac.path
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == "vec"),
+        );
+        if !parsed && !matches!(self.options.visit_macros, MacroTraversal::Auto) {
+            mac.tokens = self.visit_opaque_macro_tokens(mac.tokens.clone());
+        }
         self.preserve_explicit_float_types = previous;
     }
 
@@ -511,29 +687,74 @@ impl VisitMut for ReplaceNumbers {
 /// `literal` placeholder, including expression-shaped macro arguments. Special
 /// constants such as `EPSILON` use methods on the target type.
 ///
-/// `visit_macros = auto` (the default) visits expression arguments in standard
-/// `vec!`, `assert!`, `assert_eq!`, `assert_ne!`, `debug_assert!`,
-/// `debug_assert_eq!`, `debug_assert_ne!`, `dbg!`, and formatting/output macros.
-/// Explicitly suffixed floats retain their types in auto macros other than `vec!`;
-/// standalone `dbg!` literals also stay unchanged.
-/// Use `skip_macros = [dbg]` for macros with incompatible syntax,
-/// `visit_macros = all` for other expression-shaped macros, or
-/// `visit_macros = none` to disable traversal entirely.
+/// `visit_macros = auto` (the default) rewrites expression arguments in `vec!`,
+/// `assert!`, `assert_eq!`, `assert_ne!`, `debug_assert!`, `debug_assert_eq!`,
+/// `debug_assert_ne!`, and `dbg!`. Use `visit_macros = all` to rewrite
+/// other macro arguments, including comma- or semicolon-separated expressions
+/// and floating-point atoms inside custom token syntax. Alternatively use
+/// `visit_macros = [case, declare]` to rewrite named macros in addition to
+/// those included in `auto`.
+/// Opaque macro bodies are scanned token by token, preserving punctuation and
+/// ambiguous integer tokens. In auto mode, explicit float suffixes stay typed
+/// outside `vec!`; use unsuffixed literals for generic comparisons.
+/// Use `skip_macros = [dbg]` to exclude macros with incompatible syntax.
+/// These settings can alter macros
+/// that inspect token syntax or expect literal, identifier, or pattern arguments.
+/// Use `visit_macros = none` to leave all macro arguments unchanged.
 #[proc_macro_attribute]
-pub fn generic_float(args: TokenStream, item: TokenStream) -> TokenStream {
-    let options = parse_macro_input!(args as Options);
-    let mut function = parse_macro_input!(item as ItemFn);
+pub fn generic_float(
+    args: proc_macro::TokenStream,
+    item: proc_macro::TokenStream,
+) -> proc_macro::TokenStream {
+    expand_generic_float(args.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+fn expand_generic_float(args: TokenStream2, item: TokenStream2) -> Result<TokenStream2> {
+    let options = syn::parse2::<Options>(args)?;
+    let mut function = syn::parse2::<ItemFn>(item)?;
     ReplaceNumbers {
         options,
         preserve_explicit_float_types: false,
     }
     .visit_block_mut(&mut function.block);
-    quote!(#function).into()
+    Ok(quote!(#function))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expansion_uses_proc_macro2_and_reports_parse_errors() {
+        let expanded = expand_generic_float(
+            quote!(T),
+            quote!(
+                fn example<T: num_traits::Float>(value: T) -> T {
+                    PI + 2.0 * value
+                }
+            ),
+        )
+        .unwrap();
+        let expanded = expanded.to_string();
+        assert!(expanded.contains("core :: f64 :: consts :: PI"));
+        assert!(expanded.contains("T :: from"));
+        assert!(expand_generic_float(
+            quote!(T, invalid = true),
+            quote!(
+                fn example() {}
+            )
+        )
+        .is_err());
+        assert!(expand_generic_float(
+            quote!(T),
+            quote!(
+                struct Example;
+            )
+        )
+        .is_err());
+    }
 
     #[test]
     fn default_includes_constants_and_floats() {
@@ -550,10 +771,29 @@ mod tests {
             ("T, visit_macros = none", MacroTraversal::None),
             ("T, visit_macros = auto", MacroTraversal::Auto),
             ("T, visit_macros = all", MacroTraversal::All),
+            (
+                "T, visit_macros = []",
+                MacroTraversal::Selected(HashSet::new()),
+            ),
         ] {
             let parsed: Options = syn::parse_str(attribute).unwrap();
             assert!(parsed.visit_macros == mode);
         }
+    }
+
+    #[test]
+    fn selected_macro_names_are_parsed() {
+        let parsed: Options =
+            syn::parse_str("T, visit_macros = [case, declare, debug_assert, auto, all]").unwrap();
+        let MacroTraversal::Selected(names) = parsed.visit_macros else {
+            panic!("expected selected macros");
+        };
+        assert_eq!(names.len(), 5);
+        assert!(names.contains("case"));
+        assert!(names.contains("declare"));
+        assert!(names.contains("debug_assert"));
+        assert!(names.contains("auto"));
+        assert!(names.contains("all"));
     }
 
     #[test]
@@ -583,6 +823,7 @@ mod tests {
             "T, convert = f32::from(1.0)",
             "T, convert = custom!(value => literal)",
             "T, visit_macros = all, visit_macros = none",
+            "T, visit_macros = [case, case]",
             "T, skip_macros = [dbg, dbg]",
             "T, skip_macros = [dbg], skip_macros = [assert_eq]",
             "T, visit_macros = true",

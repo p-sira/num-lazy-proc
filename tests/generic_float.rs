@@ -102,8 +102,93 @@ fn statement_macro<T: Float>() -> Vec<T> {
     values
 }
 
+macro_rules! case {
+    ($condition:expr, $result:expr) => {
+        if $condition {
+            return $result;
+        }
+    };
+    (@any [$($value:expr),+] == $target:expr, $result:expr) => {
+        $(if $value == $target {
+            return $result;
+        })+
+    };
+}
+
+macro_rules! declare {
+    (mut [$($name:ident $(= $value:expr)?),+ $(,)?]) => {
+        $(let mut $name $(= $value)?;)+
+    };
+    (mut [$($name:ident),+ $(,)?] = $value:expr) => {
+        $(let mut $name = $value;)+
+    };
+    ([$($name:ident $(= $value:expr)?),+ $(,)?]) => {
+        $(let $name $(= $value)?;)+
+    };
+}
+
+#[generic_float(T, visit_macros = [case, debug_assert])]
+fn selected_case_macros<T: Float>(x: T, y: T) -> T {
+    debug_assert!(x <= INF);
+    case!(@any [x.abs(), y.abs()] == INF, PI_2);
+    case!(x < 0.5, EPS);
+    PI
+}
+
+#[allow(unused_mut)]
+#[generic_float(T, visit_macros = [declare])]
+fn selected_declare_macros<T: Float>() -> (T, T, T, T) {
+    declare!(mut [first = PI, second = NAN]);
+    declare!(mut [third, fourth] = INF);
+    declare!([fifth = EPS]);
+    (first + fifth, second, third, fourth)
+}
+
+macro_rules! bind_name {
+    ($name:ident = $value:expr) => {{
+        let $name = $value;
+        $name
+    }};
+}
+
+#[allow(non_snake_case)]
+#[generic_float(T, visit_macros = [bind_name])]
+fn selected_single_assignment<T: Float>() -> T {
+    bind_name!(PI = 2.0)
+}
+
+macro_rules! take {
+    (@value $value:expr) => {
+        $value
+    };
+}
+
+macro_rules! tagged_list {
+    ($tag:ident [$($value:expr),+]) => {
+        vec![$($value),+]
+    };
+}
+
+#[generic_float(T, visit_macros = [tagged_list])]
+fn opaque_macro_tagged_list<T: Float>() -> Vec<T> {
+    tagged_list!(value [PI, 1.5])
+}
+
+#[generic_float(T, include = [constants, float, integer], visit_macros = [take])]
+fn opaque_macro_protects_integer_contexts<T: Float>() -> (T, Vec<T>) {
+    let values = [1.5, 2.5];
+    let selected = take!(@value values[0]);
+    let repeated = take!(@value vec![PI; 2]);
+    (selected, repeated)
+}
+
 #[generic_float(T, include = [float, integer])]
 fn qualified_auto_vec<T: Float>() -> Vec<T> {
+    std::vec![1.5; 2]
+}
+
+#[generic_float(T, include = [float, integer], visit_macros = [vec])]
+fn qualified_selected_vec<T: Float>() -> Vec<T> {
     std::vec![1.5; 2]
 }
 
@@ -149,6 +234,43 @@ fn auto_preserves_explicit_float_types<T: Float>(value: T) -> T {
     assert_eq!(f64::from(2_u8), 2.0_f64);
     std::assert_ne!(core::f64::consts::PI, 3.125_f64);
     value
+}
+
+macro_rules! literal_sensitive {
+    ($name:ident => $value:literal) => {
+        $value
+    };
+}
+
+#[generic_float(T, visit_macros = [case])]
+fn selected_macro_does_not_change_others<T: Float>(x: T) -> (T, f64) {
+    case!(x == INF, (PI, literal_sensitive!(name => 2.5)));
+    (x, literal_sensitive!(name => 2.5))
+}
+
+#[generic_float(T, visit_macros = [case])]
+fn selected_macro_preserves_nested_sensitive<T: Float>(x: T) -> T {
+    case!(@any [x] == INF, PI + T::from(literal_sensitive!(name => 2.5)).unwrap());
+    x
+}
+
+// Names that are traversal modes when unbracketed are ordinary macro names
+// inside an explicit selection list.
+macro_rules! auto {
+    ($value:expr) => {
+        $value
+    };
+}
+
+macro_rules! all {
+    ($value:expr) => {
+        $value
+    };
+}
+
+#[generic_float(T, visit_macros = [auto, all])]
+fn selected_macros_named_like_modes<T: Float>() -> T {
+    auto!(PI) + all!(0.5)
 }
 
 #[generic_float(T)]
@@ -477,8 +599,43 @@ fn macros_can_be_ignored_or_left_unparsed() {
 }
 
 #[test]
-fn automatic_macros_preserve_concrete_types_and_can_be_skipped() {
+fn selected_macros_rewrite_expression_and_custom_syntax() {
+    assert_eq!(selected_case_macros(0.25_f32, 1.0), f32::EPSILON);
+    assert_eq!(
+        selected_case_macros(f32::INFINITY, 1.0),
+        core::f32::consts::FRAC_PI_2
+    );
+    assert_eq!(selected_case_macros(1.0_f64, 1.0), core::f64::consts::PI);
+
+    let (first, second, third, fourth) = selected_declare_macros::<f32>();
+    assert_eq!(first, core::f32::consts::PI + f32::EPSILON);
+    assert!(second.is_nan());
+    assert_eq!(third, f32::INFINITY);
+    assert_eq!(fourth, f32::INFINITY);
+
+    assert_eq!(selected_macro_does_not_change_others(2.0_f64), (2.0, 2.5));
+    assert_eq!(
+        selected_macro_preserves_nested_sensitive(f32::INFINITY),
+        core::f32::consts::PI + 2.5
+    );
+}
+
+#[test]
+fn selected_macros_preserve_assignments_indices_and_repetitions() {
+    assert_eq!(selected_single_assignment::<f32>(), 2.0_f32);
+    let (selected, repeated) = opaque_macro_protects_integer_contexts::<f32>();
+    assert_eq!(selected, 1.5_f32);
+    assert_eq!(repeated, vec![core::f32::consts::PI; 2]);
     assert_eq!(qualified_auto_vec::<f32>(), vec![1.5_f32; 2]);
+    assert_eq!(qualified_selected_vec::<f64>(), vec![1.5_f64; 2]);
+    assert_eq!(
+        opaque_macro_tagged_list::<f32>(),
+        vec![core::f32::consts::PI, 1.5]
+    );
+}
+
+#[test]
+fn automatic_macros_preserve_concrete_types_and_can_be_skipped() {
     assert_eq!(auto_preserves_explicit_float_types(0.5_f32), 0.5_f32);
     assert_eq!(shadowed_auto_macros::simple_literal::<f32>(), 1.5_f64);
     assert_eq!(
@@ -486,6 +643,18 @@ fn automatic_macros_preserve_concrete_types_and_can_be_skipped() {
         (1.5, 1.5, -1.5)
     );
     assert!(shadowed_auto_macros::skipped_macro::<f32>());
+}
+
+#[test]
+fn macro_names_can_match_traversal_mode_names() {
+    assert_eq!(
+        selected_macros_named_like_modes::<f32>(),
+        core::f32::consts::PI + 0.5
+    );
+    assert_eq!(
+        selected_macros_named_like_modes::<f64>(),
+        core::f64::consts::PI + 0.5
+    );
 }
 
 #[test]

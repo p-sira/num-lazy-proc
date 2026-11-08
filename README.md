@@ -40,7 +40,7 @@ fn circumference<T: Float>(radius: T) -> T {
 
 By default, the macro converts **floating-point literals** and **recognized constants**, and the resulting code is type-checked normally by Rust. See [Detailed Usage](#detailed-usage) for extra control options.
 
-Mathematical constants come from `core::f64::consts` and are converted to the target type using the same conversion as numeric literals, hence, it doesn't require the `T: FloatConst` bound. Special values such as `EPSILON` and `NAN` use methods on the target type.
+Mathematical constants use `core::f64::consts` or equivalent `f64` literals for constants unavailable on Rust 1.88. They are converted to the target type using the same conversion as numeric literals, so no `T: FloatConst` bound is required. Special values such as `EPSILON` and `NAN` use methods on the target type.
 
 ## Detailed Usage
 
@@ -75,9 +75,30 @@ fn euler_buckling_load<T: num_traits::Float>(E: T, second_moment: T, length: T) 
 
 Only standalone, unqualified identifiers are rewritten. Paths such as `my_module::E` and `E::my_method()` are left unchanged and do not need to be included in `ignore`.
 
-Recognized special constants: `EPS` (`EPSILON`), `INF` (`INFINITY`), `NEG_INF` (`NEG_INFINITY`), `NAN`, `MIN_VAL`, `MAX_VAL`, `MIN_POSITIVE`, and `NEG_ZERO`. These use methods on the target type, so no `FloatConst` bound is needed.
+Recognized special constants: `EPS` (`EPSILON`), `INF` (`INFINITY`), `NEG_INF` (`NEG_INFINITY`), `NAN`, `MIN_VAL`, `MAX_VAL`, `MIN_POSITIVE`, and `NEG_ZERO`. These use methods on the target type, so no `FloatConst` bound is needed. `MIN`, `MAX`, and integer metadata such as `RADIX`, `DIGITS`, and exponent limits are left unchanged.
 
-Recognized mathematical constants: `PI`, `TAU`, `E`, `PHI` (the golden ratio), `PI_2` (`FRAC_PI_2`), `PI_3` (`FRAC_PI_3`), `FRAC_1_PI`, `FRAC_2_PI`, `FRAC_2_SQRT_PI`, `SQRT_2`, `FRAC_1_SQRT_2`, `LN_2`, `LN_10`, `LOG2_10`, `LOG2_E`, `LOG10_2`, and `LOG10_E`.
+Automatically recognized mathematical constants:
+
+- `PI`, `TAU`, `E`, `GOLDEN_RATIO` (`PHI`), and `EULER_GAMMA`.
+- `FRAC_PI_2`, `FRAC_PI_3`, `FRAC_PI_4`, `FRAC_PI_6`, and `FRAC_PI_8`, with aliases `PI_2`, `PI_3`, `PI_4`, `PI_6`, and `PI_8`.
+- `FRAC_1_PI`, `FRAC_2_PI`, and `FRAC_2_SQRT_PI`.
+- `SQRT_2` and `FRAC_1_SQRT_2`.
+- `LN_2`, `LN_10`, `LOG2_10`, `LOG2_E`, `LOG10_2`, and `LOG10_E`.
+
+### Enabling experimental constants
+
+Stable constants and existing aliases are automatic. Experimental constants require explicit inclusion through `constants = [...]`. This list adds to the defaults; `constants = []` keeps the defaults. Stable names may also appear in the list. Unknown or duplicate names are rejected.
+
+```rust
+#[num_lazy_proc::generic_float(T, constants = [SQRT_3])]
+fn example<T: num_traits::Float>() -> T {
+    PI + SQRT_3
+}
+```
+
+Available experimental constants: `SQRT_3`, `SQRT_5`, `FRAC_1_SQRT_3`, `FRAC_1_SQRT_5`, `FRAC_1_SQRT_PI`, and `FRAC_1_SQRT_2PI`. Unselected names remain unchanged in expressions and nested macros. `ignore` takes precedence over explicit inclusion, and `include` must contain the `constants` category for any constants to be rewritten.
+
+This follows the stable/experimental boundary in [Rust's constant catalog](https://doc.rust-lang.org/std/f64/consts/index.html). Future experimental constants require explicit inclusion; constants may become automatic when stabilized in Rust. Experimental constants, `GOLDEN_RATIO`, and `EULER_GAMMA` use correctly rounded `f64` literals to preserve Rust 1.88 compatibility without nightly features.
 
 ### Nested macros
 

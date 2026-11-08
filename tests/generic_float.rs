@@ -458,8 +458,10 @@ fn special_aliases<T: Float>() -> (T, T, T, T, T, T) {
 }
 
 #[generic_float(T, include = [constants])]
-fn pi_aliases<T: Float>() -> (T, T, T, T) {
-    (FRAC_PI_2, PI_2, FRAC_PI_3, PI_3)
+fn pi_aliases<T: Float>() -> [T; 10] {
+    [
+        FRAC_PI_2, PI_2, FRAC_PI_3, PI_3, FRAC_PI_4, PI_4, FRAC_PI_6, PI_6, FRAC_PI_8, PI_8,
+    ]
 }
 
 #[allow(non_snake_case)]
@@ -468,13 +470,20 @@ fn min_max_are_not_constants<T: Float>(MIN: T, MAX: T) -> T {
     MIN + MAX
 }
 
-#[generic_float(T, include = [constants], convert = <T as CustomScalar>::from_f64(literal))]
-fn custom_scalar_phi<T: CustomScalar>() -> T {
-    PHI
+#[generic_float(T, include = [constants])]
+fn limits<T: Float>() -> [T; 3] {
+    [MIN_VAL, MAX_VAL, MIN_POSITIVE]
 }
 
-#[generic_float(T, include = [constants])]
-fn generic_constant_catalog<T: Float>() -> [T; 17] {
+#[generic_float(T, include = [constants], convert = <T as CustomScalar>::from_f64(literal))]
+fn custom_scalar_phi<T: CustomScalar>() -> [T; 3] {
+    [PHI, GOLDEN_RATIO, EULER_GAMMA]
+}
+
+#[generic_float(T, include = [constants], constants = [
+    SQRT_3, SQRT_5, FRAC_1_SQRT_3, FRAC_1_SQRT_5, FRAC_1_SQRT_PI, FRAC_1_SQRT_2PI,
+])]
+fn generic_constant_catalog<T: Float>() -> [T; 28] {
     [
         PI,
         FRAC_PI_2,
@@ -493,11 +502,99 @@ fn generic_constant_catalog<T: Float>() -> [T; 17] {
         SQRT_2,
         FRAC_1_SQRT_2,
         PHI,
+        FRAC_PI_4,
+        FRAC_PI_6,
+        FRAC_PI_8,
+        GOLDEN_RATIO,
+        EULER_GAMMA,
+        SQRT_3,
+        SQRT_5,
+        FRAC_1_SQRT_3,
+        FRAC_1_SQRT_5,
+        FRAC_1_SQRT_PI,
+        FRAC_1_SQRT_2PI,
     ]
 }
 
+#[allow(non_snake_case)]
+#[generic_float(T, visit_macros = [take])]
+fn experimental_identifiers<T: Float>(values: [T; 6]) -> ([T; 6], Vec<T>, T) {
+    let [SQRT_3, SQRT_5, FRAC_1_SQRT_3, FRAC_1_SQRT_5, FRAC_1_SQRT_PI, FRAC_1_SQRT_2PI] = values;
+    (
+        [
+            SQRT_3,
+            SQRT_5,
+            FRAC_1_SQRT_3,
+            FRAC_1_SQRT_5,
+            FRAC_1_SQRT_PI,
+            FRAC_1_SQRT_2PI,
+        ],
+        vec![
+            SQRT_3,
+            SQRT_5,
+            FRAC_1_SQRT_3,
+            FRAC_1_SQRT_5,
+            FRAC_1_SQRT_PI,
+            FRAC_1_SQRT_2PI,
+        ],
+        take!(@value SQRT_3),
+    )
+}
+
+#[allow(non_snake_case)]
+#[generic_float(T, constants = [SQRT_3, PI], visit_macros = [take])]
+fn selected_experimental<T: Float>(SQRT_5: T) -> [T; 5] {
+    [PI, SQRT_3, SQRT_5, vec![SQRT_3][0], take!(@value SQRT_3)]
+}
+
+#[allow(non_snake_case)]
+#[generic_float(T, constants = [SQRT_3], ignore = [SQRT_3])]
+fn ignored_experimental<T: Float>(SQRT_3: T) -> T {
+    SQRT_3 + PI
+}
+
+#[allow(non_snake_case)]
+#[generic_float(T, include = [float], constants = [SQRT_3])]
+fn excluded_constants<T: Float>(SQRT_3: T) -> T {
+    SQRT_3 + 1.0
+}
+
+#[allow(non_snake_case)]
+#[generic_float(T, constants = [])]
+fn empty_constant_selection<T: Float>(SQRT_3: T) -> T {
+    SQRT_3 + PI
+}
+
+#[generic_float(T, constants = [SQRT_3], convert = <T as CustomScalar>::from_f64(literal))]
+fn custom_experimental<T: CustomScalar>() -> T {
+    SQRT_3
+}
+
+#[test]
+fn experimental_constants_require_explicit_inclusion() {
+    let values = [2.0_f64, 3.0, 4.0, 5.0, 6.0, 7.0];
+    let (direct, automatic, opaque) = experimental_identifiers(values);
+    assert_eq!(direct, values);
+    assert_eq!(automatic, values);
+    assert_eq!(opaque, values[0]);
+
+    let root = f64::from_bits(0x3ffb_b67a_e858_4caa);
+    assert_eq!(
+        selected_experimental(42.0_f64),
+        [core::f64::consts::PI, root, 42.0, root, root]
+    );
+    assert_eq!(ignored_experimental(42.0_f64), 42.0 + core::f64::consts::PI);
+    assert_eq!(excluded_constants(42.0_f64), 43.0);
+    assert_eq!(
+        empty_constant_selection(42.0_f64),
+        42.0 + core::f64::consts::PI
+    );
+    assert_eq!(custom_experimental::<f64>().to_bits(), root.to_bits());
+    assert_eq!(custom_experimental::<f32>().to_bits(), 0x3fdd_b3d7);
+}
+
 #[allow(clippy::approx_constant)]
-fn expected_f32_constant_catalog() -> [f32; 17] {
+fn expected_f32_constant_catalog() -> [f32; 28] {
     [
         core::f32::consts::PI,
         core::f32::consts::FRAC_PI_2,
@@ -516,6 +613,17 @@ fn expected_f32_constant_catalog() -> [f32; 17] {
         core::f32::consts::SQRT_2,
         core::f32::consts::FRAC_1_SQRT_2,
         1.618_034_f32,
+        core::f32::consts::FRAC_PI_4,
+        core::f32::consts::FRAC_PI_6,
+        core::f32::consts::FRAC_PI_8,
+        f32::from_bits(0x3fcf_1bbd),
+        f32::from_bits(0x3f13_c468),
+        f32::from_bits(0x3fdd_b3d7),
+        f32::from_bits(0x400f_1bbd),
+        f32::from_bits(0x3f13_cd3a),
+        f32::from_bits(0x3ee4_f92e),
+        f32::from_bits(0x3f10_6ebb),
+        f32::from_bits(0x3ecc_422a),
     ]
 }
 
@@ -564,8 +672,18 @@ fn custom_conversion_without_num_traits_bound() {
         1.0 + core::f64::consts::PI
     );
     assert_eq!(custom_scalar_integer(3.0_f32), 6.0_f32);
-    assert_eq!(custom_scalar_phi::<f32>().to_bits(), 0x3fcf_1bbd);
-    assert_eq!(custom_scalar_phi::<f64>().to_bits(), 0x3ff9_e377_9b97_f4a8);
+    assert_eq!(
+        custom_scalar_phi::<f32>().map(f32::to_bits),
+        [0x3fcf_1bbd, 0x3fcf_1bbd, 0x3f13_c468]
+    );
+    assert_eq!(
+        custom_scalar_phi::<f64>().map(f64::to_bits),
+        [
+            0x3ff9_e377_9b97_f4a8,
+            0x3ff9_e377_9b97_f4a8,
+            0x3fe2_788c_fc6f_b619
+        ]
+    );
     let expected = 2.0 + core::f64::consts::PI;
     assert_eq!(macro_based_conversion(1.0_f64), expected);
     assert_eq!(nested_macro_conversion(1.0_f64), expected);
@@ -698,11 +816,9 @@ fn special_constants() {
 
 #[test]
 fn standard_names_and_compatibility_aliases_agree() {
-    let (half_pi, half_pi_alias, third_pi, third_pi_alias) = pi_aliases::<f32>();
-    assert_eq!(half_pi.to_bits(), half_pi_alias.to_bits());
-    assert_eq!(third_pi.to_bits(), third_pi_alias.to_bits());
-    assert_eq!(half_pi.to_bits(), core::f32::consts::FRAC_PI_2.to_bits());
-    assert_eq!(third_pi.to_bits(), core::f32::consts::FRAC_PI_3.to_bits());
+    for pair in pi_aliases::<f32>().as_chunks::<2>().0 {
+        assert_eq!(pair[0].to_bits(), pair[1].to_bits());
+    }
 
     let (epsilon, eps_alias, infinity, inf_alias, negative_infinity, negative_inf_alias) =
         special_aliases::<f64>();
@@ -713,7 +829,30 @@ fn standard_names_and_compatibility_aliases_agree() {
     assert_eq!(infinity, f64::INFINITY);
     assert_eq!(negative_infinity, f64::NEG_INFINITY);
 
+    assert_eq!(limits::<f32>(), [f32::MIN, f32::MAX, f32::MIN_POSITIVE]);
+    assert_eq!(limits::<f64>(), [f64::MIN, f64::MAX, f64::MIN_POSITIVE]);
     assert_eq!(min_max_are_not_constants(2.0_f64, 3.0_f64), 5.0_f64);
+}
+
+#[test]
+fn added_f64_constants_match_rust_values() {
+    // IEEE 754 encodings of Rust's constants, including those unavailable on 1.88.
+    let expected = [
+        0x3fe9_21fb_5444_2d18,
+        0x3fe0_c152_382d_7366,
+        0x3fd9_21fb_5444_2d18,
+        0x3ff9_e377_9b97_f4a8,
+        0x3fe2_788c_fc6f_b619,
+        0x3ffb_b67a_e858_4caa,
+        0x4001_e377_9b97_f4a8,
+        0x3fe2_79a7_4590_331c,
+        0x3fdc_9f25_c5bf_edd9,
+        0x3fe2_0dd7_5042_9b6d,
+        0x3fd9_8845_33d4_3651,
+    ];
+    for (value, bits) in generic_constant_catalog::<f64>()[17..].iter().zip(expected) {
+        assert_eq!(value.to_bits(), bits);
+    }
 }
 
 #[test]

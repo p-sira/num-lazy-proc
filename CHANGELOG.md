@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3
+
+### 0.3.0
+**New Features**
+- `generic_float`: Support `FRAC_PI_4`, `FRAC_PI_6`, and `FRAC_PI_8` with aliases `PI_4`, `PI_6`, and `PI_8`; `GOLDEN_RATIO` as an alias for `PHI`; and `EULER_GAMMA`. Preserve Rust 1.88 compatibility without requiring nightly features.
+- `constants = [...]`: Explicitly enable experimental constants `SQRT_3`, `SQRT_5`, `FRAC_1_SQRT_3`, `FRAC_1_SQRT_5`, `FRAC_1_SQRT_PI`, and `FRAC_1_SQRT_2PI`. Stable constants and existing aliases remain automatic. `ignore` takes precedence, and `include` still controls whether constants are rewritten.
+
 ## 0.2
 
 ### 0.2.0

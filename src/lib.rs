@@ -17,12 +17,14 @@
 //! such as `arr[0]` and `powi(2)` continue to work. Use `include = [...]` to select
 //! which categories the attribute rewrites. Nested items and const expressions
 //! are left unchanged.
+//! Stable constants and existing aliases are recognized automatically. Use
+//! `constants = [SQRT_3]` to additionally enable experimental constants.
 //! The optional `convert` argument accepts any Rust expression containing the
 //! `literal` placeholder, including expression-shaped macro arguments.
 //!
-//! Mathematical constants come from `core::f64::consts` and are converted to the
-//! target type using the same conversion as numeric literals, so no `FloatConst`
-//! bound is needed.
+//! Mathematical constants use `core::f64::consts` or equivalent `f64` literals
+//! for constants unavailable on Rust 1.88. They use the same conversion as
+//! numeric literals, so no `FloatConst` bound is needed.
 //!
 //! ```
 //! /// F = π² × E × I / L²
@@ -65,10 +67,52 @@ impl Default for Inclusion {
     }
 }
 
+enum Constant<'a> {
+    Special(&'static str),
+    Math(&'a str),
+    Value(f64),
+    Experimental(f64),
+}
+
+impl<'a> Constant<'a> {
+    // Literal fallbacks preserve Rust 1.88 compatibility and match Rust's values.
+    #[allow(clippy::approx_constant)]
+    fn from_name(name: &'a str) -> Option<Self> {
+        Some(match name {
+            "EPSILON" | "EPS" => Self::Special("epsilon"),
+            "INFINITY" | "INF" => Self::Special("infinity"),
+            "NEG_INFINITY" | "NEG_INF" => Self::Special("neg_infinity"),
+            "NAN" => Self::Special("nan"),
+            "MIN_VAL" => Self::Special("min_value"),
+            "MAX_VAL" => Self::Special("max_value"),
+            "MIN_POSITIVE" => Self::Special("min_positive_value"),
+            "NEG_ZERO" => Self::Special("neg_zero"),
+            "PHI" | "GOLDEN_RATIO" => Self::Value(1.618_033_988_749_895_f64),
+            "EULER_GAMMA" => Self::Value(0.577_215_664_901_532_9_f64),
+            "SQRT_3" => Self::Experimental(1.732_050_807_568_877_2_f64),
+            "SQRT_5" => Self::Experimental(2.236_067_977_499_79_f64),
+            "FRAC_1_SQRT_3" => Self::Experimental(0.577_350_269_189_625_7_f64),
+            "FRAC_1_SQRT_5" => Self::Experimental(0.447_213_595_499_957_9_f64),
+            "FRAC_1_SQRT_PI" => Self::Experimental(0.564_189_583_547_756_3_f64),
+            "FRAC_1_SQRT_2PI" => Self::Experimental(0.398_942_280_401_432_7_f64),
+            "PI_2" | "FRAC_PI_2" => Self::Math("FRAC_PI_2"),
+            "PI_3" | "FRAC_PI_3" => Self::Math("FRAC_PI_3"),
+            "PI_4" | "FRAC_PI_4" => Self::Math("FRAC_PI_4"),
+            "PI_6" | "FRAC_PI_6" => Self::Math("FRAC_PI_6"),
+            "PI_8" | "FRAC_PI_8" => Self::Math("FRAC_PI_8"),
+            "PI" | "FRAC_1_PI" | "FRAC_2_PI" | "FRAC_2_SQRT_PI" | "TAU" | "E" | "LN_2"
+            | "LN_10" | "LOG2_10" | "LOG2_E" | "LOG10_2" | "LOG10_E" | "SQRT_2"
+            | "FRAC_1_SQRT_2" => Self::Math(name),
+            _ => return None,
+        })
+    }
+}
+
 struct Options {
     target: Ident,
     ignore: HashSet<String>,
     skip_macros: HashSet<String>,
+    constants: HashSet<String>,
     include: Inclusion,
     conversion: Option<Expr>,
     visit_macros: MacroTraversal,
@@ -132,6 +176,8 @@ impl Parse for Options {
         let mut seen_ignore = false;
         let mut seen_skip_macros = false;
         let mut seen_include = false;
+        let mut constants = HashSet::new();
+        let mut seen_constants = false;
         let mut conversion = None;
         let mut visit_macros = MacroTraversal::Auto;
         let mut seen_visit_macros = false;
@@ -159,6 +205,21 @@ impl Parse for Options {
                     for name in names {
                         if !skip_macros.insert(name.to_string()) {
                             return Err(syn::Error::new_spanned(name, "duplicate macro name"));
+                        }
+                    }
+                }
+                "constants" if !seen_constants => {
+                    seen_constants = true;
+                    let content;
+                    bracketed!(content in input);
+                    let names = Punctuated::<Ident, Token![,]>::parse_terminated(&content)?;
+                    for name in names {
+                        let value = name.to_string();
+                        if Constant::from_name(&value).is_none() {
+                            return Err(syn::Error::new_spanned(name, "unknown constant"));
+                        }
+                        if !constants.insert(value) {
+                            return Err(syn::Error::new_spanned(name, "duplicate constant name"));
                         }
                     }
                 }
@@ -238,7 +299,7 @@ impl Parse for Options {
                         };
                     }
                 }
-                "ignore" | "skip_macros" | "include" | "convert" | "visit_macros" => {
+                "ignore" | "skip_macros" | "include" | "convert" | "visit_macros" | "constants" => {
                     return Err(syn::Error::new_spanned(key, "duplicate option"));
                 }
                 _ => return Err(syn::Error::new_spanned(key, "unknown option")),
@@ -249,6 +310,7 @@ impl Parse for Options {
             target,
             ignore,
             skip_macros,
+            constants,
             include,
             conversion,
             visit_macros,
@@ -494,44 +556,25 @@ impl ReplaceNumbers {
 
     fn constant(&self, name: &str) -> Option<Expr> {
         let target = &self.options.target;
-        let special = match name {
-            "EPSILON" | "EPS" => Some("epsilon"),
-            "INFINITY" | "INF" => Some("infinity"),
-            "NEG_INFINITY" | "NEG_INF" => Some("neg_infinity"),
-            "NAN" => Some("nan"),
-            "MIN_VAL" => Some("min_value"),
-            "MAX_VAL" => Some("max_value"),
-            "MIN_POSITIVE" => Some("min_positive_value"),
-            "NEG_ZERO" => Some("neg_zero"),
-            _ => None,
+        let base = match Constant::from_name(name)? {
+            Constant::Special(method) => {
+                let method = Ident::new(method, Span::call_site());
+                return Some(Expr::Verbatim(quote!(#target::#method())));
+            }
+            Constant::Math(name) => {
+                let constant = Ident::new(name, Span::call_site());
+                Expr::Verbatim(quote!(core::f64::consts::#constant))
+            }
+            Constant::Experimental(_) if !self.options.constants.contains(name) => return None,
+            Constant::Value(value) | Constant::Experimental(value) => {
+                // Restrict the allowance to the generated fallback declaration.
+                Expr::Verbatim(quote!({
+                    #[allow(clippy::approx_constant)]
+                    const VALUE: f64 = #value;
+                    VALUE
+                }))
+            }
         };
-        if let Some(method) = special {
-            let method = Ident::new(method, Span::call_site());
-            return Some(Expr::Verbatim(quote!(#target::#method())));
-        }
-
-        // Use correctly rounded decimal literals for compatibility with Rust
-        // versions before core::{f32,f64}::consts::GOLDEN_RATIO was stabilized.
-        // Restrict the Clippy allowance to the generated constant declaration.
-        if name == "PHI" {
-            let phi = Expr::Verbatim(quote!({
-                #[allow(clippy::approx_constant)]
-                const PHI_VALUE: f64 = 1.618_033_988_749_895_f64;
-                PHI_VALUE
-            }));
-            return Some(self.convert(phi));
-        }
-
-        let constant_name = match name {
-            "PI_2" | "FRAC_PI_2" => "FRAC_PI_2",
-            "PI_3" | "FRAC_PI_3" => "FRAC_PI_3",
-            "PI" | "FRAC_1_PI" | "FRAC_2_PI" | "FRAC_2_SQRT_PI" | "TAU" | "E" | "LN_2"
-            | "LN_10" | "LOG2_10" | "LOG2_E" | "LOG10_2" | "LOG10_E" | "SQRT_2"
-            | "FRAC_1_SQRT_2" => name,
-            _ => return None,
-        };
-        let constant = Ident::new(constant_name, Span::call_site());
-        let base = Expr::Verbatim(quote!(core::f64::consts::#constant));
         Some(self.convert(base))
     }
 }
@@ -686,6 +729,9 @@ impl VisitMut for ReplaceNumbers {
 /// Even when included, integer literals in indices, array/repetition lengths,
 /// and type or const generic arguments remain unchanged.
 /// Use `ignore = [E]` to prevent the macro from replacing that identifier.
+/// Stable constants and existing aliases are automatic; `constants = [SQRT_3]`
+/// additionally enables named experimental constants. An empty list keeps the
+/// defaults. `ignore` takes precedence, and `include` must enable `constants`.
 ///
 /// By default, included literals are converted using `T::from(literal).unwrap()`.
 /// The optional `convert` argument accepts any Rust expression containing the
@@ -843,6 +889,12 @@ mod tests {
     #[test]
     fn invalid_inclusion_is_rejected() {
         for attribute in [
+            "T, constants = [SQRT_3, SQRT_3]",
+            "T, constants = [SQRT_3], constants = []",
+            "T, constants = [UNKNOWN]",
+            "T, constants = [MIN]",
+            "T, constants = [MAX]",
+            "T, constants = all",
             "T, include = [float, float]",
             "T, include = [floats]",
             "T, include = [integer], include = [constants]",
